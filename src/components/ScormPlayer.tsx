@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Play, Pause, RotateCcw, Maximize2, Minimize2 } from "lucide-react";
+import { RotateCcw, Maximize2, Minimize2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
-import JSZip from "jszip";
+import { parseScormPackage, createScormRuntime } from "@/utils/scormPlayer";
 
 interface ScormPlayerProps {
   file: File | null;
@@ -12,10 +12,13 @@ interface ScormPlayerProps {
 
 export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   const [isLoading, setIsLoading] = useState(true);
-  const [contentUrl, setContentUrl] = useState<string>("");
+  const [contentHtml, setContentHtml] = useState<string>("");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [scormVersion, setScormVersion] = useState<string>("");
+  const [courseTitle, setCourseTitle] = useState<string>("");
   const [scormData, setScormData] = useState({
     lesson_status: "not attempted",
+    completion_status: "incomplete",
     score: 0,
     session_time: "00:00:00",
   });
@@ -27,48 +30,61 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       loadScormPackage(file);
     }
 
-    // Setup SCORM API
-    setupScormAPI();
-
     return () => {
-      if (contentUrl) {
-        URL.revokeObjectURL(contentUrl);
-      }
+      // Cleanup
     };
   }, [file]);
 
+  useEffect(() => {
+    // Setup SCORM API after iframe loads
+    if (contentHtml && iframeRef.current) {
+      setupScormAPI();
+    }
+  }, [contentHtml]);
+
   const setupScormAPI = () => {
+    const iframeWindow = iframeRef.current?.contentWindow as Window & {
+      API?: any;
+      API_1484_11?: any;
+    };
+    if (!iframeWindow) return;
+
     // SCORM 1.2 API
-    (window as any).API = {
+    iframeWindow.API = {
       LMSInitialize: () => {
-        console.log("SCORM: LMSInitialize called");
+        console.log("SCORM 1.2: LMSInitialize called");
+        setScormData((prev) => ({ ...prev, lesson_status: "incomplete" }));
+        toast.success("SCORM session started");
         return "true";
       },
       LMSFinish: () => {
-        console.log("SCORM: LMSFinish called");
+        console.log("SCORM 1.2: LMSFinish called");
         toast.success("SCORM session completed");
         return "true";
       },
       LMSGetValue: (element: string) => {
-        console.log("SCORM: LMSGetValue", element);
+        console.log("SCORM 1.2: LMSGetValue", element);
         if (element === "cmi.core.lesson_status") {
           return scormData.lesson_status;
+        } else if (element === "cmi.core.score.raw") {
+          return String(scormData.score);
         }
         return "";
       },
       LMSSetValue: (element: string, value: string) => {
-        console.log("SCORM: LMSSetValue", element, value);
+        console.log("SCORM 1.2: LMSSetValue", element, "=", value);
         if (element === "cmi.core.lesson_status") {
           setScormData((prev) => ({ ...prev, lesson_status: value }));
-          toast.info(`Lesson status: ${value}`);
+          toast.info(`Status: ${value}`);
         } else if (element === "cmi.core.score.raw") {
-          setScormData((prev) => ({ ...prev, score: parseInt(value) || 0 }));
-          toast.success(`Score: ${value}`);
+          const score = parseInt(value) || 0;
+          setScormData((prev) => ({ ...prev, score }));
+          toast.success(`Score: ${score}`);
         }
         return "true";
       },
       LMSCommit: () => {
-        console.log("SCORM: LMSCommit called");
+        console.log("SCORM 1.2: LMSCommit called");
         return "true";
       },
       LMSGetLastError: () => "0",
@@ -77,9 +93,11 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
     };
 
     // SCORM 2004 API
-    (window as any).API_1484_11 = {
+    iframeWindow.API_1484_11 = {
       Initialize: () => {
         console.log("SCORM 2004: Initialize called");
+        setScormData((prev) => ({ ...prev, completion_status: "incomplete" }));
+        toast.success("SCORM session started");
         return "true";
       },
       Terminate: () => {
@@ -90,18 +108,21 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       GetValue: (element: string) => {
         console.log("SCORM 2004: GetValue", element);
         if (element === "cmi.completion_status") {
-          return scormData.lesson_status;
+          return scormData.completion_status;
+        } else if (element === "cmi.score.raw") {
+          return String(scormData.score);
         }
         return "";
       },
       SetValue: (element: string, value: string) => {
-        console.log("SCORM 2004: SetValue", element, value);
+        console.log("SCORM 2004: SetValue", element, "=", value);
         if (element === "cmi.completion_status") {
-          setScormData((prev) => ({ ...prev, lesson_status: value }));
-          toast.info(`Completion status: ${value}`);
+          setScormData((prev) => ({ ...prev, completion_status: value }));
+          toast.info(`Completion: ${value}`);
         } else if (element === "cmi.score.raw") {
-          setScormData((prev) => ({ ...prev, score: parseInt(value) || 0 }));
-          toast.success(`Score: ${value}`);
+          const score = parseInt(value) || 0;
+          setScormData((prev) => ({ ...prev, score }));
+          toast.success(`Score: ${score}`);
         }
         return "true";
       },
@@ -113,54 +134,32 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       GetErrorString: () => "",
       GetDiagnostic: () => "",
     };
+
+    console.log("SCORM API initialized for iframe");
   };
 
   const loadScormPackage = async (zipFile: File) => {
     setIsLoading(true);
     try {
-      const zip = await JSZip.loadAsync(zipFile);
+      toast.info("Parsing SCORM package...");
       
-      // Find imsmanifest.xml
-      const manifestFile = zip.file("imsmanifest.xml");
-      if (!manifestFile) {
-        toast.error("Invalid SCORM package: imsmanifest.xml not found");
-        setIsLoading(false);
-        return;
-      }
-
-      const manifestContent = await manifestFile.async("text");
-      const parser = new DOMParser();
-      const xmlDoc = parser.parseFromString(manifestContent, "text/xml");
+      const { manifest, files } = await parseScormPackage(zipFile);
       
-      // Find the launch file
-      const resource = xmlDoc.querySelector("resource[href]");
-      const launchFile = resource?.getAttribute("href") || "index.html";
+      setScormVersion(manifest.version);
+      setCourseTitle(manifest.title);
       
-      console.log("Launch file:", launchFile);
-
-      // Create a blob URL for the entire package
-      // We need to extract all files and create object URLs
-      const fileMap: { [key: string]: string } = {};
+      toast.info("Extracting course content...");
       
-      for (const [path, zipEntry] of Object.entries(zip.files)) {
-        if (!zipEntry.dir) {
-          const blob = await zipEntry.async("blob");
-          fileMap[path] = URL.createObjectURL(blob);
-        }
-      }
-
-      // Find the launch file blob
-      const launchBlob = await zip.file(launchFile)?.async("blob");
-      if (launchBlob) {
-        const url = URL.createObjectURL(launchBlob);
-        setContentUrl(url);
-        toast.success("SCORM package loaded successfully");
-      } else {
-        toast.error(`Launch file not found: ${launchFile}`);
-      }
+      const html = await createScormRuntime(files, manifest.launchUrl);
+      
+      setContentHtml(html);
+      
+      toast.success(`SCORM ${manifest.version} package loaded`);
     } catch (error) {
       console.error("Error loading SCORM package:", error);
-      toast.error("Failed to load SCORM package");
+      toast.error("Failed to load SCORM package", {
+        description: error instanceof Error ? error.message : "Unknown error",
+      });
     } finally {
       setIsLoading(false);
     }
@@ -169,12 +168,25 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   const handleRestart = () => {
     setScormData({
       lesson_status: "not attempted",
+      completion_status: "incomplete",
       score: 0,
       session_time: "00:00:00",
     });
+    
+    // Reload iframe content
     if (iframeRef.current) {
-      iframeRef.current.src = contentUrl;
+      const iframe = iframeRef.current;
+      iframe.src = "about:blank";
+      setTimeout(() => {
+        if (iframe.contentWindow) {
+          iframe.contentWindow.document.open();
+          iframe.contentWindow.document.write(contentHtml);
+          iframe.contentWindow.document.close();
+          setupScormAPI();
+        }
+      }, 100);
     }
+    
     toast.info("SCORM content restarted");
   };
 
@@ -205,17 +217,38 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
     };
   }, []);
 
+  useEffect(() => {
+    // Write HTML to iframe when content is ready
+    if (contentHtml && iframeRef.current) {
+      const iframe = iframeRef.current;
+      iframe.contentWindow?.document.open();
+      iframe.contentWindow?.document.write(contentHtml);
+      iframe.contentWindow?.document.close();
+      
+      // Setup API after content is loaded
+      setTimeout(() => {
+        setupScormAPI();
+      }, 500);
+    }
+  }, [contentHtml]);
+
   if (!file) {
     return null;
   }
 
+  const displayStatus = scormVersion === "2004" 
+    ? scormData.completion_status 
+    : scormData.lesson_status;
+
   return (
     <div className="space-y-4" ref={containerRef}>
-      <Card className="p-4">
+      <Card className="p-4 animate-fade-in">
         <div className="flex items-center justify-between mb-4">
           <div>
-            <h3 className="font-semibold text-lg">SCORM Player</h3>
-            <p className="text-sm text-muted-foreground">{file.name}</p>
+            <h3 className="font-semibold text-lg">{courseTitle || "SCORM Player"}</h3>
+            <p className="text-sm text-muted-foreground">
+              {file.name} • SCORM {scormVersion || "..."}
+            </p>
           </div>
           <div className="flex gap-2">
             <Button
@@ -238,10 +271,10 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
               ) : (
                 <Maximize2 className="w-4 h-4 mr-2" />
               )}
-              {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
+              {isFullscreen ? "Exit" : "Fullscreen"}
             </Button>
             <Button variant="outline" size="sm" onClick={onClose}>
-              Close Player
+              Close
             </Button>
           </div>
         </div>
@@ -250,30 +283,41 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
         <div className="flex gap-4 text-sm mb-4 p-3 bg-muted/30 rounded-lg">
           <div>
             <span className="text-muted-foreground">Status: </span>
-            <span className="font-medium">{scormData.lesson_status}</span>
+            <span className="font-medium capitalize">{displayStatus}</span>
           </div>
           <div>
             <span className="text-muted-foreground">Score: </span>
             <span className="font-medium">{scormData.score}</span>
           </div>
+          <div>
+            <span className="text-muted-foreground">Version: </span>
+            <span className="font-medium">SCORM {scormVersion}</span>
+          </div>
         </div>
 
         {/* SCORM Content Frame */}
-        <div className="relative bg-white rounded-lg overflow-hidden" style={{ height: isFullscreen ? "100vh" : "600px" }}>
+        <div
+          className="relative bg-background rounded-lg overflow-hidden border border-border"
+          style={{ height: isFullscreen ? "calc(100vh - 180px)" : "600px" }}
+        >
           {isLoading ? (
-            <div className="absolute inset-0 flex items-center justify-center bg-muted/50">
+            <div className="absolute inset-0 flex items-center justify-center bg-muted/50 backdrop-blur-sm">
               <div className="text-center">
-                <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary mx-auto mb-4"></div>
-                <p className="text-muted-foreground">Loading SCORM package...</p>
+                <Loader2 className="w-12 h-12 text-primary mx-auto mb-4 animate-spin" />
+                <p className="text-muted-foreground font-medium">
+                  Loading SCORM package...
+                </p>
+                <p className="text-xs text-muted-foreground mt-2">
+                  Parsing manifest and extracting content
+                </p>
               </div>
             </div>
-          ) : contentUrl ? (
+          ) : contentHtml ? (
             <iframe
               ref={iframeRef}
-              src={contentUrl}
               className="w-full h-full border-0"
               title="SCORM Content"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
             />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center">
