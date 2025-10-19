@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Upload, FileCode, Video, ClipboardCheck, Download } from "lucide-react";
+import { Upload, FileCode, Video, ClipboardCheck, Download, PlayCircle, Maximize2 } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -9,27 +9,41 @@ import { TranscriptView } from "@/components/TranscriptView";
 import { VideoView } from "@/components/VideoView";
 import { AssessmentView } from "@/components/AssessmentView";
 import { ScriptsDownload } from "@/components/ScriptsDownload";
+import { ScormPlayer } from "@/components/ScormPlayer";
 import { analyzeSCORMPackage, type SCORMAnalysis } from "@/utils/scormAnalyzer";
 
 const Index = () => {
   const [analysis, setAnalysis] = useState<SCORMAnalysis | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [mode, setMode] = useState<"analyze" | "play">("analyze");
+  const [playFile, setPlayFile] = useState<File | null>(null);
 
   const handleFileUpload = async (file: File) => {
     setIsProcessing(true);
     try {
-      const result = await analyzeSCORMPackage(file);
-      setAnalysis(result);
-      toast.success(`Successfully analyzed SCORM package`, {
-        description: `Found ${result.transcripts.length} transcripts, ${result.videos.length} videos, ${result.assessments.length} assessments`,
-      });
+      if (mode === "play") {
+        setPlayFile(file);
+        toast.success("SCORM package ready to play");
+      } else {
+        const result = await analyzeSCORMPackage(file);
+        setAnalysis(result);
+        toast.success(`Successfully analyzed SCORM package`, {
+          description: `Found ${result.transcripts.length} transcripts, ${result.videos.length} videos, ${result.assessments.length} assessments`,
+        });
+      }
     } catch (error) {
-      toast.error("Failed to analyze SCORM package", {
+      toast.error("Failed to process SCORM package", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
     } finally {
       setIsProcessing(false);
     }
+  };
+
+  const handleModeSwitch = (newMode: "analyze" | "play") => {
+    setMode(newMode);
+    setAnalysis(null);
+    setPlayFile(null);
   };
 
   return (
@@ -43,21 +57,73 @@ const Index = () => {
                 SCORM Analysis Toolkit
               </h1>
               <p className="text-sm text-muted-foreground mt-1">
-                Extract transcripts, videos, and assessments from SCORM packages
+                {mode === "play" 
+                  ? "Play and interact with SCORM content" 
+                  : "Extract transcripts, videos, and assessments from SCORM packages"}
               </p>
             </div>
-            <Button variant="outline" size="sm" asChild>
-              <a href="https://docs.lovable.dev/features/cloud" target="_blank" rel="noopener noreferrer">
-                <Download className="w-4 h-4 mr-2" />
-                Local Scripts
-              </a>
-            </Button>
+            <div className="flex gap-2">
+              <div className="flex border border-border rounded-lg p-1">
+                <Button
+                  variant={mode === "analyze" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => handleModeSwitch("analyze")}
+                >
+                  <FileCode className="w-4 h-4 mr-2" />
+                  Analyze
+                </Button>
+                <Button
+                  variant={mode === "play" ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => handleModeSwitch("play")}
+                >
+                  <PlayCircle className="w-4 h-4 mr-2" />
+                  Play
+                </Button>
+              </div>
+              {mode === "analyze" && (
+                <Button variant="outline" size="sm" asChild>
+                  <a href="https://docs.lovable.dev/features/cloud" target="_blank" rel="noopener noreferrer">
+                    <Download className="w-4 h-4 mr-2" />
+                    Local Scripts
+                  </a>
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </header>
 
       <main className="container mx-auto px-4 py-8">
-        {!analysis ? (
+        {mode === "play" ? (
+          <div className="max-w-6xl mx-auto">
+            {!playFile ? (
+              <>
+                <UploadZone onFileUpload={handleFileUpload} isProcessing={isProcessing} />
+                
+                <div className="mt-12 grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <Card className="p-6 bg-gradient-to-br from-card to-card/50 border-border/50 hover:border-primary/50 transition-colors">
+                    <PlayCircle className="w-8 h-8 text-primary mb-3" />
+                    <h3 className="font-semibold mb-2">Interactive SCORM Player</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Play SCORM 1.2 and 2004 content with full API support
+                    </p>
+                  </Card>
+                  
+                  <Card className="p-6 bg-gradient-to-br from-card to-card/50 border-border/50 hover:border-primary/50 transition-colors">
+                    <Maximize2 className="w-8 h-8 text-primary mb-3" />
+                    <h3 className="font-semibold mb-2">Fullscreen Mode</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Experience SCORM content in immersive fullscreen view
+                    </p>
+                  </Card>
+                </div>
+              </>
+            ) : (
+              <ScormPlayer file={playFile} onClose={() => setPlayFile(null)} />
+            )}
+          </div>
+        ) : !analysis ? (
           <div className="max-w-2xl mx-auto">
             <UploadZone onFileUpload={handleFileUpload} isProcessing={isProcessing} />
             
