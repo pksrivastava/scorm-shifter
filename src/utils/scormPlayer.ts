@@ -172,25 +172,79 @@ export const createScormRuntime = async (
       // Inject API finder script at the beginning of the document
       const apiFinderScript = `
         <script>
+          console.log('[SCORM Player] Starting API search...');
+          
           // SCORM API Finder - looks for API in parent/opener windows
           function findAPI(win) {
             var findAPITries = 0;
-            while ((win.API == null || win.API_1484_11 == null) && (win.parent != null) && (win.parent != win)) {
+            
+            // Check current window first
+            if (win.API != null) {
+              console.log('[SCORM Player] Found SCORM 1.2 API in current window');
+              return win;
+            }
+            if (win.API_1484_11 != null) {
+              console.log('[SCORM Player] Found SCORM 2004 API in current window');
+              return win;
+            }
+            
+            // Search parent windows
+            while ((win.API == null && win.API_1484_11 == null) && (win.parent != null) && (win.parent != win)) {
               findAPITries++;
-              if (findAPITries > 7) {
+              console.log('[SCORM Player] Searching parent window, attempt:', findAPITries);
+              
+              if (findAPITries > 500) {
+                console.error('[SCORM Player] API search exceeded maximum attempts');
                 return null;
               }
+              
               win = win.parent;
+              
+              if (win.API != null) {
+                console.log('[SCORM Player] Found SCORM 1.2 API in parent window');
+                return win;
+              }
+              if (win.API_1484_11 != null) {
+                console.log('[SCORM Player] Found SCORM 2004 API in parent window');
+                return win;
+              }
             }
-            return win;
+            
+            console.warn('[SCORM Player] No API found after searching all parent windows');
+            return null;
           }
           
           // Make API available
-          var apiWindow = findAPI(window);
-          if (apiWindow) {
-            window.API = apiWindow.API;
-            window.API_1484_11 = apiWindow.API_1484_11;
+          try {
+            var apiWindow = findAPI(window);
+            if (apiWindow) {
+              if (apiWindow.API) {
+                window.API = apiWindow.API;
+                console.log('[SCORM Player] SCORM 1.2 API successfully bound to window');
+              }
+              if (apiWindow.API_1484_11) {
+                window.API_1484_11 = apiWindow.API_1484_11;
+                console.log('[SCORM Player] SCORM 2004 API successfully bound to window');
+              }
+            } else {
+              console.error('[SCORM Player] Failed to find SCORM API');
+            }
+          } catch (e) {
+            console.error('[SCORM Player] Error during API setup:', e);
           }
+          
+          // Verify API is accessible
+          setTimeout(function() {
+            if (window.API) {
+              console.log('[SCORM Player] SCORM 1.2 API verified and ready');
+            }
+            if (window.API_1484_11) {
+              console.log('[SCORM Player] SCORM 2004 API verified and ready');
+            }
+            if (!window.API && !window.API_1484_11) {
+              console.error('[SCORM Player] ERROR: No SCORM API available!');
+            }
+          }, 100);
         </script>
       `;
 

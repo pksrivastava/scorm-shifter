@@ -339,14 +339,26 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
     };
 
     console.log("SCORM API initialized on parent window");
+    console.log("Available APIs:", {
+      "SCORM 1.2": !!win.API,
+      "SCORM 2004": !!win.API_1484_11
+    });
   };
 
   const loadScormPackage = async (zipFile: File) => {
     setIsLoading(true);
     try {
+      console.log("[SCORM Player] Starting package parse:", zipFile.name);
       toast.info("Parsing SCORM package...");
       
       const { manifest, files } = await parseScormPackage(zipFile);
+      
+      console.log("[SCORM Player] Package parsed successfully:", {
+        version: manifest.version,
+        title: manifest.title,
+        launchUrl: manifest.launchUrl,
+        fileCount: Object.keys(files).length
+      });
       
       setScormVersion(manifest.version);
       setCourseTitle(manifest.title);
@@ -355,11 +367,13 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       
       const { html } = await createScormRuntime(files, manifest.launchUrl);
       
+      console.log("[SCORM Player] Runtime HTML prepared, length:", html.length);
+      
       setContentHtml(html);
       
       toast.success(`SCORM ${manifest.version} package loaded successfully`);
     } catch (error) {
-      console.error("Error loading SCORM package:", error);
+      console.error("[SCORM Player] Error loading SCORM package:", error);
       toast.error("Failed to load SCORM package", {
         description: error instanceof Error ? error.message : "Unknown error",
       });
@@ -458,13 +472,22 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   useEffect(() => {
     // Setup API first, then write HTML to iframe when content is ready
     if (contentHtml && iframeRef.current) {
+      console.log("[SCORM Player] Setting up SCORM environment...");
+      
       // Setup API on parent window FIRST
       setupScormAPI();
       
-      const iframe = iframeRef.current;
-      iframe.contentWindow?.document.open();
-      iframe.contentWindow?.document.write(contentHtml);
-      iframe.contentWindow?.document.close();
+      // Small delay to ensure API is fully registered
+      setTimeout(() => {
+        const iframe = iframeRef.current;
+        if (iframe && iframe.contentWindow) {
+          console.log("[SCORM Player] Writing content to iframe...");
+          iframe.contentWindow.document.open();
+          iframe.contentWindow.document.write(contentHtml);
+          iframe.contentWindow.document.close();
+          console.log("[SCORM Player] Content loaded successfully");
+        }
+      }, 50);
     }
   }, [contentHtml]);
 
@@ -557,7 +580,8 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
               ref={iframeRef}
               className="w-full h-full border-0"
               title="SCORM Content"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals"
+              sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-top-navigation-by-user-activation allow-popups-to-escape-sandbox"
+              allow="autoplay; fullscreen"
             />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center">
