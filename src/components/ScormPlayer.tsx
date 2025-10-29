@@ -397,12 +397,80 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
 
       console.log("[SCORM] Base path:", basePath);
 
-      // Inject SCORM API finder script at the beginning
-      const apiFinderScript = `
+      // Create resource mapping for runtime interception
+      const fileUrlsJson = JSON.stringify(Array.from(fileUrls.entries()));
+
+      // Inject comprehensive SCORM runtime script
+      const runtimeScript = `
 <script>
 (function() {
-  console.log("[SCORM Content] Starting API search...");
+  console.log("[SCORM Runtime] Initializing...");
   
+  // Build resource map
+  var resourceMap = new Map(${fileUrlsJson});
+  console.log("[SCORM Runtime] Loaded " + resourceMap.size + " resource mappings");
+  
+  // Helper to resolve paths
+  function resolvePath(path) {
+    if (!path) return null;
+    
+    // Skip absolute URLs and data URIs
+    if (path.startsWith('http://') || path.startsWith('https://') || 
+        path.startsWith('data:') || path.startsWith('blob:') ||
+        path.startsWith('//') || path.startsWith('#')) {
+      return path;
+    }
+    
+    // Try exact match first
+    if (resourceMap.has(path)) {
+      return resourceMap.get(path);
+    }
+    
+    // Try without leading ./
+    var cleanPath = path.replace(/^\.\//, '');
+    if (resourceMap.has(cleanPath)) {
+      return resourceMap.get(cleanPath);
+    }
+    
+    // Try without leading /
+    var noSlash = path.replace(/^\//, '');
+    if (resourceMap.has(noSlash)) {
+      return resourceMap.get(noSlash);
+    }
+    
+    // Try with ./
+    if (resourceMap.has('./' + path)) {
+      return resourceMap.get('./' + path);
+    }
+    
+    console.warn("[SCORM Runtime] Could not resolve:", path);
+    return null;
+  }
+  
+  // Intercept fetch
+  var originalFetch = window.fetch;
+  window.fetch = function(input, init) {
+    var url = typeof input === 'string' ? input : input.url;
+    var resolved = resolvePath(url);
+    if (resolved && resolved !== url) {
+      console.log("[SCORM Runtime] Fetch intercepted:", url, "->", resolved.substring(0, 50) + "...");
+      return originalFetch(resolved, init);
+    }
+    return originalFetch(input, init);
+  };
+  
+  // Intercept XMLHttpRequest
+  var originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
+    var resolved = resolvePath(url);
+    if (resolved && resolved !== url) {
+      console.log("[SCORM Runtime] XHR intercepted:", url, "->", resolved.substring(0, 50) + "...");
+      return originalOpen.call(this, method, resolved, async, user, password);
+    }
+    return originalOpen.call(this, method, url, async, user, password);
+  };
+  
+  // Find SCORM API in parent windows
   function findAPI(win) {
     var attempts = 0;
     var maxAttempts = 500;
@@ -410,19 +478,16 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
     while (win && attempts < maxAttempts) {
       attempts++;
       
-      // Check for SCORM 1.2 API
       if (win.API != null) {
-        console.log("[SCORM Content] Found SCORM 1.2 API at level " + attempts);
+        console.log("[SCORM Runtime] Found SCORM 1.2 API at level", attempts);
         window.API = win.API;
       }
       
-      // Check for SCORM 2004 API
       if (win.API_1484_11 != null) {
-        console.log("[SCORM Content] Found SCORM 2004 API at level " + attempts);
+        console.log("[SCORM Runtime] Found SCORM 2004 API at level", attempts);
         window.API_1484_11 = win.API_1484_11;
       }
       
-      // If both found or reached top, stop
       if ((window.API != null || window.API_1484_11 != null) || win === win.parent) {
         break;
       }
@@ -431,87 +496,41 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
     }
     
     if (window.API != null) {
-      console.log("[SCORM Content] SCORM 1.2 API available");
+      console.log("[SCORM Runtime] SCORM 1.2 API ready");
     }
     if (window.API_1484_11 != null) {
-      console.log("[SCORM Content] SCORM 2004 API available");
+      console.log("[SCORM Runtime] SCORM 2004 API ready");
     }
-    if (window.API == null && window.API_1484_11 == null) {
-      console.error("[SCORM Content] No SCORM API found after " + attempts + " attempts");
+    if (!window.API && !window.API_1484_11) {
+      console.error("[SCORM Runtime] No SCORM API found!");
     }
   }
   
-  // Try to find API immediately
+  // Find API immediately and on load
   findAPI(window.parent);
   
-  // Also try after load
   if (document.readyState === 'loading') {
     window.addEventListener('DOMContentLoaded', function() {
+      console.log("[SCORM Runtime] DOM loaded, re-searching for API");
       findAPI(window.parent);
     });
   }
+  
+  console.log("[SCORM Runtime] Initialization complete");
 })();
 </script>
 `;
 
-      // Insert API finder script right after <head> or at the beginning
+      // Insert runtime script at the beginning of head
       if (launchHtml.includes("<head>")) {
-        launchHtml = launchHtml.replace("<head>", "<head>" + apiFinderScript);
+        launchHtml = launchHtml.replace("<head>", "<head>" + runtimeScript);
       } else if (launchHtml.includes("<html>")) {
-        launchHtml = launchHtml.replace("<html>", "<html>" + apiFinderScript);
+        launchHtml = launchHtml.replace("<html>", "<html><head>" + runtimeScript + "</head>");
       } else {
-        launchHtml = apiFinderScript + launchHtml;
+        launchHtml = runtimeScript + launchHtml;
       }
 
-      // Replace all resource paths with blob URLs
-      let replacementCount = 0;
-      launchHtml = launchHtml.replace(
-        /(src|href|data|poster|background)=["']([^"']+)["']/gi,
-        (match, attr, path) => {
-          // Skip absolute URLs, data URIs, and fragments
-          if (
-            path.startsWith("http://") ||
-            path.startsWith("https://") ||
-            path.startsWith("data:") ||
-            path.startsWith("//") ||
-            path.startsWith("#") ||
-            path.startsWith("javascript:") ||
-            path.startsWith("mailto:")
-          ) {
-            return match;
-          }
-
-          // Try multiple path resolution strategies
-          const pathVariations = [
-            path,
-            path.replace(/^\.\//, ""),
-            path.replace(/^\//, ""),
-            basePath + path,
-            basePath + path.replace(/^\.\//, ""),
-            basePath + path.replace(/^\//, ""),
-          ];
-
-          for (const variant of pathVariations) {
-            const url = fileUrls.get(variant);
-            if (url) {
-              replacementCount++;
-              console.log(`[SCORM] Resolved ${path} -> ${variant}`);
-              return `${attr}="${url}"`;
-            }
-          }
-
-          console.warn(`[SCORM] Could not resolve path: ${path}`);
-          return match;
-        }
-      );
-
-      console.log(`[SCORM] Replaced ${replacementCount} resource paths`);
-
-      // Add base tag to help with relative paths
-      const baseTag = `<base href="blob:">`;
-      if (launchHtml.includes("<head>") && !launchHtml.includes("<base")) {
-        launchHtml = launchHtml.replace("<head>", `<head>${baseTag}`);
-      }
+      console.log("[SCORM] Runtime script injected into HTML");
 
       // Create final blob with proper HTML MIME type
       const finalBlob = new Blob([launchHtml], { type: "text/html;charset=utf-8" });
