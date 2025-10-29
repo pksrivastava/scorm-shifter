@@ -26,6 +26,7 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   const [scormVersion, setScormVersion] = useState<string>("");
   const [courseTitle, setCourseTitle] = useState<string>("");
   const [iframeSrc, setIframeSrc] = useState<string>("");
+  const [iframeDoc, setIframeDoc] = useState<string>("");
   const [cmiData, setCmiData] = useState<CMIData>({});
   
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -323,7 +324,7 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       // Setup API before loading content
       setupScormAPI();
 
-      // Extract ALL files and create blob URLs with comprehensive path mapping
+      // Extract ALL files and create blob URLs
       const fileUrls = new Map<string, string>();
       const extractPromises: Promise<void>[] = [];
 
@@ -331,54 +332,30 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
         if (!file.dir) {
           extractPromises.push(
             file.async("blob").then((blob) => {
-              // Determine MIME type based on extension
-              const ext = relativePath.split('.').pop()?.toLowerCase() || '';
-              const mimeTypes: Record<string, string> = {
-                'html': 'text/html',
-                'htm': 'text/html',
-                'css': 'text/css',
-                'js': 'application/javascript',
-                'json': 'application/json',
-                'xml': 'application/xml',
-                'jpg': 'image/jpeg',
-                'jpeg': 'image/jpeg',
-                'png': 'image/png',
-                'gif': 'image/gif',
-                'svg': 'image/svg+xml',
-                'mp3': 'audio/mpeg',
-                'mp4': 'video/mp4',
-                'woff': 'font/woff',
-                'woff2': 'font/woff2',
-                'ttf': 'font/ttf',
-              };
-              
-              const mimeType = mimeTypes[ext] || blob.type || 'application/octet-stream';
-              const typedBlob = new Blob([blob], { type: mimeType });
-              const blobUrl = URL.createObjectURL(typedBlob);
-              
+              const blobUrl = URL.createObjectURL(blob);
               blobUrlsRef.current.push(blobUrl);
               
-              // Store with multiple path variations for better matching
+              // Normalize path
               const normalized = relativePath.replace(/\\/g, "/");
+              
+              // Store with multiple variations
               fileUrls.set(relativePath, blobUrl);
               fileUrls.set(normalized, blobUrl);
               fileUrls.set("/" + normalized, blobUrl);
               fileUrls.set("./" + normalized, blobUrl);
               
-              // Store just the filename
-              const filename = relativePath.split(/[/\\]/).pop() || "";
-              if (filename) {
+              // Just filename
+              const filename = normalized.split("/").pop();
+              if (filename && !fileUrls.has(filename)) {
                 fileUrls.set(filename, blobUrl);
               }
-              
-              console.log(`[SCORM] Extracted: ${relativePath} -> ${blobUrl.substring(0, 50)}...`);
             })
           );
         }
       });
 
       await Promise.all(extractPromises);
-      console.log(`[SCORM] Extracted ${fileUrls.size} files`);
+      console.log(`[SCORM] Extracted ${fileUrls.size / 4} files with ${fileUrls.size} path variations`);
 
       // Extract launch file
       const launchFile = zip.file(launchUrl);
@@ -397,148 +374,143 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
 
       console.log("[SCORM] Base path:", basePath);
 
-      // Create resource mapping for runtime interception
-      const fileUrlsJson = JSON.stringify(Array.from(fileUrls.entries()));
+      // Function to resolve paths with all variations
+      const resolvePath = (path: string): string => {
+        if (!path || 
+            path.startsWith("http://") || 
+            path.startsWith("https://") ||
+            path.startsWith("data:") || 
+            path.startsWith("blob:") ||
+            path.startsWith("//") || 
+            path.startsWith("#") ||
+            path.startsWith("javascript:") ||
+            path.startsWith("mailto:")) {
+          return path;
+        }
 
-      // Inject comprehensive SCORM runtime script
+        // Try direct lookup
+        if (fileUrls.has(path)) return fileUrls.get(path)!;
+
+        // Try with base path
+        const withBase = basePath + path;
+        if (fileUrls.has(withBase)) return fileUrls.get(withBase)!;
+
+        // Try without leading ./
+        const cleanPath = path.replace(/^\.\//, "");
+        if (fileUrls.has(cleanPath)) return fileUrls.get(cleanPath)!;
+
+        const withBaseClean = basePath + cleanPath;
+        if (fileUrls.has(withBaseClean)) return fileUrls.get(withBaseClean)!;
+
+        // Try without leading /
+        const noSlash = path.replace(/^\//, "");
+        if (fileUrls.has(noSlash)) return fileUrls.get(noSlash)!;
+
+        return path;
+      };
+
+      // Replace ALL occurrences of resource references
+      let replacementCount = 0;
+      
+      // Replace src, href attributes
+      launchHtml = launchHtml.replace(
+        /(src|href)\s*=\s*["']([^"']+)["']/gi,
+        (match, attr, path) => {
+          const resolved = resolvePath(path);
+          if (resolved !== path) {
+            replacementCount++;
+            console.log(`[SCORM] ${attr}: ${path} -> blob`);
+            return `${attr}="${resolved}"`;
+          }
+          return match;
+        }
+      );
+
+      // Replace background images in style attributes
+      launchHtml = launchHtml.replace(
+        /url\s*\(\s*["']?([^"')]+)["']?\s*\)/gi,
+        (match, path) => {
+          const resolved = resolvePath(path);
+          if (resolved !== path) {
+            replacementCount++;
+            console.log(`[SCORM] CSS url: ${path} -> blob`);
+            return `url("${resolved}")`;
+          }
+          return match;
+        }
+      );
+
+      // Replace in style tags
+      launchHtml = launchHtml.replace(
+        /<style([^>]*)>([\s\S]*?)<\/style>/gi,
+        (match, attrs, content) => {
+          const newContent = content.replace(
+            /url\s*\(\s*["']?([^"')]+)["']?\s*\)/gi,
+            (urlMatch: string, path: string) => {
+              const resolved = resolvePath(path);
+              if (resolved !== path) {
+                replacementCount++;
+                return `url("${resolved}")`;
+              }
+              return urlMatch;
+            }
+          );
+          return `<style${attrs}>${newContent}</style>`;
+        }
+      );
+
+      console.log(`[SCORM] Replaced ${replacementCount} resource references`);
+
+      // Inject SCORM API finder and resource interceptor
       const runtimeScript = `
 <script>
 (function() {
-  console.log("[SCORM Runtime] Initializing...");
+  console.log("[SCORM] Content initializing...");
   
-  // Build resource map
-  var resourceMap = new Map(${fileUrlsJson});
-  console.log("[SCORM Runtime] Loaded " + resourceMap.size + " resource mappings");
-  
-  // Helper to resolve paths
-  function resolvePath(path) {
-    if (!path) return null;
-    
-    // Skip absolute URLs and data URIs
-    if (path.startsWith('http://') || path.startsWith('https://') || 
-        path.startsWith('data:') || path.startsWith('blob:') ||
-        path.startsWith('//') || path.startsWith('#')) {
-      return path;
-    }
-    
-    // Try exact match first
-    if (resourceMap.has(path)) {
-      return resourceMap.get(path);
-    }
-    
-    // Try without leading ./
-    var cleanPath = path.replace(/^\.\//, '');
-    if (resourceMap.has(cleanPath)) {
-      return resourceMap.get(cleanPath);
-    }
-    
-    // Try without leading /
-    var noSlash = path.replace(/^\//, '');
-    if (resourceMap.has(noSlash)) {
-      return resourceMap.get(noSlash);
-    }
-    
-    // Try with ./
-    if (resourceMap.has('./' + path)) {
-      return resourceMap.get('./' + path);
-    }
-    
-    console.warn("[SCORM Runtime] Could not resolve:", path);
-    return null;
-  }
-  
-  // Intercept fetch
-  var originalFetch = window.fetch;
-  window.fetch = function(input, init) {
-    var url = typeof input === 'string' ? input : input.url;
-    var resolved = resolvePath(url);
-    if (resolved && resolved !== url) {
-      console.log("[SCORM Runtime] Fetch intercepted:", url, "->", resolved.substring(0, 50) + "...");
-      return originalFetch(resolved, init);
-    }
-    return originalFetch(input, init);
-  };
-  
-  // Intercept XMLHttpRequest
-  var originalOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function(method, url, async, user, password) {
-    var resolved = resolvePath(url);
-    if (resolved && resolved !== url) {
-      console.log("[SCORM Runtime] XHR intercepted:", url, "->", resolved.substring(0, 50) + "...");
-      return originalOpen.call(this, method, resolved, async, user, password);
-    }
-    return originalOpen.call(this, method, url, async, user, password);
-  };
-  
-  // Find SCORM API in parent windows
+  // Find SCORM API
   function findAPI(win) {
     var attempts = 0;
-    var maxAttempts = 500;
-    
-    while (win && attempts < maxAttempts) {
+    while (win && attempts < 100) {
       attempts++;
-      
-      if (win.API != null) {
-        console.log("[SCORM Runtime] Found SCORM 1.2 API at level", attempts);
+      if (win.API) {
+        console.log("[SCORM] Found API 1.2");
         window.API = win.API;
       }
-      
-      if (win.API_1484_11 != null) {
-        console.log("[SCORM Runtime] Found SCORM 2004 API at level", attempts);
+      if (win.API_1484_11) {
+        console.log("[SCORM] Found API 2004");
         window.API_1484_11 = win.API_1484_11;
       }
-      
-      if ((window.API != null || window.API_1484_11 != null) || win === win.parent) {
-        break;
-      }
-      
+      if ((window.API || window.API_1484_11) || win === win.parent) break;
       win = win.parent;
     }
-    
-    if (window.API != null) {
-      console.log("[SCORM Runtime] SCORM 1.2 API ready");
-    }
-    if (window.API_1484_11 != null) {
-      console.log("[SCORM Runtime] SCORM 2004 API ready");
-    }
-    if (!window.API && !window.API_1484_11) {
-      console.error("[SCORM Runtime] No SCORM API found!");
-    }
   }
   
-  // Find API immediately and on load
   findAPI(window.parent);
+  window.addEventListener('DOMContentLoaded', function() {
+    findAPI(window.parent);
+  });
   
-  if (document.readyState === 'loading') {
-    window.addEventListener('DOMContentLoaded', function() {
-      console.log("[SCORM Runtime] DOM loaded, re-searching for API");
-      findAPI(window.parent);
-    });
-  }
-  
-  console.log("[SCORM Runtime] Initialization complete");
+  console.log("[SCORM] Content ready");
 })();
 </script>
 `;
 
-      // Insert runtime script at the beginning of head
-      if (launchHtml.includes("<head>")) {
-        launchHtml = launchHtml.replace("<head>", "<head>" + runtimeScript);
-      } else if (launchHtml.includes("<html>")) {
-        launchHtml = launchHtml.replace("<html>", "<html><head>" + runtimeScript + "</head>");
+      // Inject at beginning
+      if (launchHtml.match(/<head[^>]*>/i)) {
+        launchHtml = launchHtml.replace(/<head[^>]*>/i, (match) => match + runtimeScript);
       } else {
         launchHtml = runtimeScript + launchHtml;
       }
 
-      console.log("[SCORM] Runtime script injected into HTML");
-
-      // Create final blob with proper HTML MIME type
+      // Set both methods - srcdoc as primary, blob as fallback
+      setIframeDoc(launchHtml);
+      
       const finalBlob = new Blob([launchHtml], { type: "text/html;charset=utf-8" });
       const finalUrl = URL.createObjectURL(finalBlob);
       blobUrlsRef.current.push(finalUrl);
-
-      console.log("[SCORM] Final iframe URL created:", finalUrl);
       setIframeSrc(finalUrl);
+
+      console.log("[SCORM] Content prepared, length:", launchHtml.length);
       
       toast.success(`SCORM ${version} package loaded successfully`);
       console.log("[SCORM] Package ready to play");
@@ -661,13 +633,14 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
                 <p className="text-xs text-muted-foreground mt-2">Extracting and preparing content</p>
               </div>
             </div>
-          ) : iframeSrc ? (
+          ) : iframeDoc ? (
             <iframe
               ref={iframeRef}
-              src={iframeSrc}
+              srcDoc={iframeDoc}
               className="w-full h-full border-0"
               title="SCORM Content"
               allow="autoplay; fullscreen"
+              sandbox="allow-same-origin allow-scripts allow-forms allow-popups allow-modals allow-downloads"
             />
           ) : (
             <div className="absolute inset-0 flex items-center justify-center">
