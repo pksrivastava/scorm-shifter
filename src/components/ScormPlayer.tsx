@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { RotateCcw, Maximize2, Minimize2, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import JSZip from "jszip";
+import { Scorm12API, Scorm2004API } from "scorm-again";
 
 interface ScormPlayerProps {
   file: File | null;
@@ -31,241 +32,54 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const startTimeRef = useRef<number>(Date.now());
   const blobUrlsRef = useRef<string[]>([]);
-  const apiInitializedRef = useRef(false);
+  const scormAPIRef = useRef<any>(null);
 
-  // Initialize CMI data based on version
-  const initializeCMIData = (version: string): CMIData => {
-    if (version === "2004") {
-      return {
-        "cmi.completion_status": "incomplete",
-        "cmi.success_status": "unknown",
-        "cmi.score.raw": "",
-        "cmi.score.min": "0",
-        "cmi.score.max": "100",
-        "cmi.score.scaled": "",
-        "cmi.learner_id": "student_001",
-        "cmi.learner_name": "SCORM Student",
-        "cmi.location": "",
-        "cmi.session_time": "PT0H0M0S",
-        "cmi.total_time": "PT0H0M0S",
-        "cmi.mode": "normal",
-        "cmi.credit": "credit",
-        "cmi.entry": "ab-initio",
-        "cmi.exit": "",
-        "cmi.suspend_data": "",
-      };
-    } else {
-      return {
-        "cmi.core.lesson_status": "not attempted",
-        "cmi.core.score.raw": "",
-        "cmi.core.score.min": "0",
-        "cmi.core.score.max": "100",
-        "cmi.core.student_id": "student_001",
-        "cmi.core.student_name": "SCORM Student",
-        "cmi.core.lesson_location": "",
-        "cmi.core.session_time": "00:00:00",
-        "cmi.core.total_time": "00:00:00",
-        "cmi.core.lesson_mode": "normal",
-        "cmi.core.credit": "credit",
-        "cmi.core.entry": "ab-initio",
-        "cmi.core.exit": "",
-        "cmi.suspend_data": "",
-        "cmi.comments": "",
-      };
-    }
-  };
-
-  // Setup SCORM API on window
-  const setupScormAPI = () => {
-    if (apiInitializedRef.current) return;
-    apiInitializedRef.current = true;
-
+  // Setup SCORM API using scorm-again library
+  const setupScormAPI = (version: string) => {
+    console.log(`[SCORM] Setting up ${version} API with scorm-again...`);
+    
     const win = window as any;
-    let initialized = false;
-    let lastError = "0";
-
-    console.log("[SCORM] Setting up API adapter...");
-
-    // SCORM 1.2 API
-    win.API = {
-      LMSInitialize: (param: string) => {
-        console.log("[SCORM 1.2] LMSInitialize");
-        if (initialized) {
-          lastError = "101";
-          return "false";
-        }
-        initialized = true;
-        startTimeRef.current = Date.now();
-        setCmiData((prev) => ({ ...prev, "cmi.core.lesson_status": "incomplete" }));
-        toast.success("Course started (SCORM 1.2)");
-        lastError = "0";
-        return "true";
-      },
-
-      LMSFinish: (param: string) => {
-        console.log("[SCORM 1.2] LMSFinish");
-        if (!initialized) {
-          lastError = "301";
-          return "false";
-        }
-        const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-        const hours = Math.floor(elapsed / 3600);
-        const minutes = Math.floor((elapsed % 3600) / 60);
-        const seconds = elapsed % 60;
-        const sessionTime = `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-        setCmiData((prev) => ({ ...prev, "cmi.core.session_time": sessionTime }));
-        initialized = false;
-        toast.success("Course completed");
-        lastError = "0";
-        return "true";
-      },
-
-      LMSGetValue: (element: string) => {
-        console.log("[SCORM 1.2] LMSGetValue:", element);
-        if (!initialized) {
-          lastError = "301";
-          return "";
-        }
-        const value = cmiData[element] || "";
-        lastError = "0";
-        return value;
-      },
-
-      LMSSetValue: (element: string, value: string) => {
-        console.log("[SCORM 1.2] LMSSetValue:", element, "=", value);
-        if (!initialized) {
-          lastError = "301";
-          return "false";
-        }
-        setCmiData((prev) => ({ ...prev, [element]: value }));
-        
-        if (element === "cmi.core.lesson_status") {
-          toast.info(`Status: ${value}`);
-        } else if (element === "cmi.core.score.raw") {
-          toast.success(`Score: ${value}`);
-        }
-        
-        lastError = "0";
-        return "true";
-      },
-
-      LMSCommit: (param: string) => {
-        console.log("[SCORM 1.2] LMSCommit");
-        if (!initialized) {
-          lastError = "301";
-          return "false";
-        }
-        lastError = "0";
-        return "true";
-      },
-
-      LMSGetLastError: () => lastError,
-      LMSGetErrorString: (errorCode: string) => {
-        const errors: Record<string, string> = {
-          "0": "No error",
-          "101": "General exception",
-          "201": "Invalid argument",
-          "301": "Not initialized",
-          "401": "Not implemented",
-        };
-        return errors[errorCode] || "";
-      },
-      LMSGetDiagnostic: (errorCode: string) => `Diagnostic for ${errorCode}`,
-    };
-
-    // SCORM 2004 API
-    win.API_1484_11 = {
-      Initialize: (param: string) => {
-        console.log("[SCORM 2004] Initialize");
-        if (initialized) {
-          lastError = "103";
-          return "false";
-        }
-        initialized = true;
-        startTimeRef.current = Date.now();
-        setCmiData((prev) => ({ ...prev, "cmi.completion_status": "incomplete" }));
-        toast.success("Course started (SCORM 2004)");
-        lastError = "0";
-        return "true";
-      },
-
-      Terminate: (param: string) => {
-        console.log("[SCORM 2004] Terminate");
-        if (!initialized) {
-          lastError = "112";
-          return "false";
-        }
-        const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000);
-        const hours = Math.floor(elapsed / 3600);
-        const minutes = Math.floor((elapsed % 3600) / 60);
-        const seconds = elapsed % 60;
-        const sessionTime = `PT${hours}H${minutes}M${seconds}S`;
-        setCmiData((prev) => ({ ...prev, "cmi.session_time": sessionTime }));
-        initialized = false;
-        toast.success("Course completed");
-        lastError = "0";
-        return "true";
-      },
-
-      GetValue: (element: string) => {
-        console.log("[SCORM 2004] GetValue:", element);
-        if (!initialized) {
-          lastError = "122";
-          return "";
-        }
-        const value = cmiData[element] || "";
-        lastError = "0";
-        return value;
-      },
-
-      SetValue: (element: string, value: string) => {
-        console.log("[SCORM 2004] SetValue:", element, "=", value);
-        if (!initialized) {
-          lastError = "132";
-          return "false";
-        }
-        setCmiData((prev) => ({ ...prev, [element]: value }));
-        
-        if (element === "cmi.completion_status") {
-          toast.info(`Completion: ${value}`);
-        } else if (element === "cmi.success_status") {
-          toast.info(`Success: ${value}`);
-        } else if (element.includes("score")) {
-          toast.success(`Score: ${value}`);
-        }
-        
-        lastError = "0";
-        return "true";
-      },
-
-      Commit: (param: string) => {
-        console.log("[SCORM 2004] Commit");
-        if (!initialized) {
-          lastError = "142";
-          return "false";
-        }
-        lastError = "0";
-        return "true";
-      },
-
-      GetLastError: () => lastError,
-      GetErrorString: (errorCode: string) => {
-        const errors: Record<string, string> = {
-          "0": "No error",
-          "103": "Already initialized",
-          "112": "Termination before init",
-          "122": "Retrieve before init",
-          "132": "Store before init",
-          "142": "Commit before init",
-        };
-        return errors[errorCode] || "";
-      },
-      GetDiagnostic: (errorCode: string) => `Diagnostic for ${errorCode}`,
-    };
-
-    console.log("[SCORM] API adapter ready");
+    
+    if (version === "2004") {
+      scormAPIRef.current = new Scorm2004API();
+      win.API_1484_11 = scormAPIRef.current;
+      console.log("[SCORM] API_1484_11 attached to window");
+    } else {
+      scormAPIRef.current = new Scorm12API();
+      win.API = scormAPIRef.current;
+      console.log("[SCORM] API attached to window");
+    }
+    
+    toast.success(`SCORM ${version} API ready`);
+  };
+  
+  // Update CMI data display
+  const updateCMIDisplay = () => {
+    if (!scormAPIRef.current) return;
+    
+    try {
+      const api = scormAPIRef.current;
+      const newData: CMIData = {};
+      
+      if (api.cmi) {
+        // Try to extract some common fields
+        Object.keys(api.cmi).forEach(key => {
+          try {
+            const value = api.cmi[key];
+            if (value !== null && value !== undefined) {
+              newData[`cmi.${key}`] = String(value);
+            }
+          } catch (e) {
+            // Ignore errors reading individual fields
+          }
+        });
+      }
+      
+      setCmiData(newData);
+    } catch (error) {
+      console.warn("[SCORM] Error updating CMI display:", error);
+    }
   };
 
   const loadScormPackage = async (zipFile: File) => {
@@ -319,10 +133,9 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       // Set course info
       setScormVersion(version);
       setCourseTitle(title);
-      setCmiData(initializeCMIData(version));
 
-      // Setup API before loading content
-      setupScormAPI();
+      // Setup SCORM API with version
+      setupScormAPI(version);
 
       // Extract ALL files and create blob URLs
       const fileUrls = new Map<string, string>();
@@ -537,14 +350,20 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
   }, [file]);
 
   const handleRestart = () => {
-    setCmiData(initializeCMIData(scormVersion));
-    startTimeRef.current = Date.now();
-    apiInitializedRef.current = false;
+    // Reset SCORM API
+    if (scormAPIRef.current) {
+      scormAPIRef.current.reset();
+      console.log("[SCORM] API reset");
+    }
+    
+    setCmiData({});
+    setupScormAPI(scormVersion);
     
     // Reload iframe
-    if (iframeRef.current && iframeSrc) {
-      setupScormAPI();
-      iframeRef.current.src = iframeSrc;
+    if (iframeRef.current && iframeDoc) {
+      const temp = iframeDoc;
+      setIframeDoc("");
+      setTimeout(() => setIframeDoc(temp), 100);
     }
     
     toast.info("Course restarted");
@@ -573,13 +392,23 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
 
   if (!file) return null;
 
-  const displayStatus = scormVersion === "2004"
-    ? cmiData["cmi.completion_status"] || "not started"
-    : cmiData["cmi.core.lesson_status"] || "not attempted";
-
-  const displayScore = scormVersion === "2004"
-    ? cmiData["cmi.score.raw"] || "0"
-    : cmiData["cmi.core.score.raw"] || "0";
+  // Get status from SCORM API
+  let displayStatus = "not started";
+  let displayScore = "0";
+  
+  try {
+    if (scormAPIRef.current && scormAPIRef.current.cmi) {
+      if (scormVersion === "2004") {
+        displayStatus = scormAPIRef.current.cmi.completion_status || "not started";
+        displayScore = scormAPIRef.current.cmi.score?.raw || "0";
+      } else {
+        displayStatus = scormAPIRef.current.cmi.core?.lesson_status || "not attempted";
+        displayScore = scormAPIRef.current.cmi.core?.score?.raw || "0";
+      }
+    }
+  } catch (error) {
+    console.warn("[SCORM] Error reading status:", error);
+  }
 
   return (
     <div className="space-y-4" ref={containerRef}>
