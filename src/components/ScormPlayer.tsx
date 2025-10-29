@@ -276,6 +276,7 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
 
       // Parse ZIP
       const zip = await JSZip.loadAsync(zipFile);
+      console.log("[SCORM] ZIP loaded successfully");
       
       // Find and parse manifest
       const manifestFile = zip.file("imsmanifest.xml");
@@ -306,7 +307,7 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       const resourceRef = firstItem?.getAttribute("identifierref");
       
       if (!resourceRef) {
-        throw new Error("No launch resource found");
+        throw new Error("No launch resource found in manifest");
       }
 
       const resource = xmlDoc.querySelector(`resource[identifier="${resourceRef}"]`);
@@ -319,22 +320,10 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
       setCourseTitle(title);
       setCmiData(initializeCMIData(version));
 
-      // Setup API before extracting files
+      // Setup API before loading content
       setupScormAPI();
 
-      // Extract launch file and create blob URL
-      const launchFile = zip.file(launchUrl);
-      if (!launchFile) {
-        throw new Error(`Launch file not found: ${launchUrl}`);
-      }
-
-      const launchBlob = await launchFile.async("blob");
-      let launchHtml = await launchBlob.text();
-
-      // Get base path
-      const basePath = launchUrl.substring(0, launchUrl.lastIndexOf("/") + 1);
-
-      // Extract all files and create blob URLs
+      // Extract ALL files and create blob URLs with comprehensive path mapping
       const fileUrls = new Map<string, string>();
       const extractPromises: Promise<void>[] = [];
 
@@ -342,60 +331,198 @@ export const ScormPlayer = ({ file, onClose }: ScormPlayerProps) => {
         if (!file.dir) {
           extractPromises.push(
             file.async("blob").then((blob) => {
-              const blobUrl = URL.createObjectURL(blob);
+              // Determine MIME type based on extension
+              const ext = relativePath.split('.').pop()?.toLowerCase() || '';
+              const mimeTypes: Record<string, string> = {
+                'html': 'text/html',
+                'htm': 'text/html',
+                'css': 'text/css',
+                'js': 'application/javascript',
+                'json': 'application/json',
+                'xml': 'application/xml',
+                'jpg': 'image/jpeg',
+                'jpeg': 'image/jpeg',
+                'png': 'image/png',
+                'gif': 'image/gif',
+                'svg': 'image/svg+xml',
+                'mp3': 'audio/mpeg',
+                'mp4': 'video/mp4',
+                'woff': 'font/woff',
+                'woff2': 'font/woff2',
+                'ttf': 'font/ttf',
+              };
+              
+              const mimeType = mimeTypes[ext] || blob.type || 'application/octet-stream';
+              const typedBlob = new Blob([blob], { type: mimeType });
+              const blobUrl = URL.createObjectURL(typedBlob);
+              
               blobUrlsRef.current.push(blobUrl);
-              fileUrls.set(relativePath, blobUrl);
               
-              // Also store with different path variations
+              // Store with multiple path variations for better matching
               const normalized = relativePath.replace(/\\/g, "/");
+              fileUrls.set(relativePath, blobUrl);
               fileUrls.set(normalized, blobUrl);
+              fileUrls.set("/" + normalized, blobUrl);
+              fileUrls.set("./" + normalized, blobUrl);
               
-              if (relativePath.startsWith(basePath)) {
-                const relative = relativePath.substring(basePath.length);
-                fileUrls.set(relative, blobUrl);
+              // Store just the filename
+              const filename = relativePath.split(/[/\\]/).pop() || "";
+              if (filename) {
+                fileUrls.set(filename, blobUrl);
               }
+              
+              console.log(`[SCORM] Extracted: ${relativePath} -> ${blobUrl.substring(0, 50)}...`);
             })
           );
         }
       });
 
       await Promise.all(extractPromises);
+      console.log(`[SCORM] Extracted ${fileUrls.size} files`);
 
-      // Replace paths in HTML
+      // Extract launch file
+      const launchFile = zip.file(launchUrl);
+      if (!launchFile) {
+        throw new Error(`Launch file not found: ${launchUrl}`);
+      }
+
+      const launchBlob = await launchFile.async("blob");
+      let launchHtml = await launchBlob.text();
+      console.log("[SCORM] Launch HTML loaded, length:", launchHtml.length);
+
+      // Get base path for relative resolution
+      const basePath = launchUrl.includes("/") 
+        ? launchUrl.substring(0, launchUrl.lastIndexOf("/") + 1)
+        : "";
+
+      console.log("[SCORM] Base path:", basePath);
+
+      // Inject SCORM API finder script at the beginning
+      const apiFinderScript = `
+<script>
+(function() {
+  console.log("[SCORM Content] Starting API search...");
+  
+  function findAPI(win) {
+    var attempts = 0;
+    var maxAttempts = 500;
+    
+    while (win && attempts < maxAttempts) {
+      attempts++;
+      
+      // Check for SCORM 1.2 API
+      if (win.API != null) {
+        console.log("[SCORM Content] Found SCORM 1.2 API at level " + attempts);
+        window.API = win.API;
+      }
+      
+      // Check for SCORM 2004 API
+      if (win.API_1484_11 != null) {
+        console.log("[SCORM Content] Found SCORM 2004 API at level " + attempts);
+        window.API_1484_11 = win.API_1484_11;
+      }
+      
+      // If both found or reached top, stop
+      if ((window.API != null || window.API_1484_11 != null) || win === win.parent) {
+        break;
+      }
+      
+      win = win.parent;
+    }
+    
+    if (window.API != null) {
+      console.log("[SCORM Content] SCORM 1.2 API available");
+    }
+    if (window.API_1484_11 != null) {
+      console.log("[SCORM Content] SCORM 2004 API available");
+    }
+    if (window.API == null && window.API_1484_11 == null) {
+      console.error("[SCORM Content] No SCORM API found after " + attempts + " attempts");
+    }
+  }
+  
+  // Try to find API immediately
+  findAPI(window.parent);
+  
+  // Also try after load
+  if (document.readyState === 'loading') {
+    window.addEventListener('DOMContentLoaded', function() {
+      findAPI(window.parent);
+    });
+  }
+})();
+</script>
+`;
+
+      // Insert API finder script right after <head> or at the beginning
+      if (launchHtml.includes("<head>")) {
+        launchHtml = launchHtml.replace("<head>", "<head>" + apiFinderScript);
+      } else if (launchHtml.includes("<html>")) {
+        launchHtml = launchHtml.replace("<html>", "<html>" + apiFinderScript);
+      } else {
+        launchHtml = apiFinderScript + launchHtml;
+      }
+
+      // Replace all resource paths with blob URLs
+      let replacementCount = 0;
       launchHtml = launchHtml.replace(
-        /(src|href)=["']([^"']+)["']/gi,
+        /(src|href|data|poster|background)=["']([^"']+)["']/gi,
         (match, attr, path) => {
+          // Skip absolute URLs, data URIs, and fragments
           if (
             path.startsWith("http://") ||
             path.startsWith("https://") ||
             path.startsWith("data:") ||
             path.startsWith("//") ||
-            path.startsWith("#")
+            path.startsWith("#") ||
+            path.startsWith("javascript:") ||
+            path.startsWith("mailto:")
           ) {
             return match;
           }
 
-          const cleanPath = path.replace(/^\.\//, "");
-          const fullPath = basePath + cleanPath;
+          // Try multiple path resolution strategies
+          const pathVariations = [
+            path,
+            path.replace(/^\.\//, ""),
+            path.replace(/^\//, ""),
+            basePath + path,
+            basePath + path.replace(/^\.\//, ""),
+            basePath + path.replace(/^\//, ""),
+          ];
 
-          const url = fileUrls.get(path) || 
-                      fileUrls.get(cleanPath) || 
-                      fileUrls.get(fullPath) ||
-                      fileUrls.get(fullPath.replace(/\\/g, "/"));
+          for (const variant of pathVariations) {
+            const url = fileUrls.get(variant);
+            if (url) {
+              replacementCount++;
+              console.log(`[SCORM] Resolved ${path} -> ${variant}`);
+              return `${attr}="${url}"`;
+            }
+          }
 
-          return url ? `${attr}="${url}"` : match;
+          console.warn(`[SCORM] Could not resolve path: ${path}`);
+          return match;
         }
       );
 
-      // Create final blob and URL
-      const finalBlob = new Blob([launchHtml], { type: "text/html" });
+      console.log(`[SCORM] Replaced ${replacementCount} resource paths`);
+
+      // Add base tag to help with relative paths
+      const baseTag = `<base href="blob:">`;
+      if (launchHtml.includes("<head>") && !launchHtml.includes("<base")) {
+        launchHtml = launchHtml.replace("<head>", `<head>${baseTag}`);
+      }
+
+      // Create final blob with proper HTML MIME type
+      const finalBlob = new Blob([launchHtml], { type: "text/html;charset=utf-8" });
       const finalUrl = URL.createObjectURL(finalBlob);
       blobUrlsRef.current.push(finalUrl);
 
+      console.log("[SCORM] Final iframe URL created:", finalUrl);
       setIframeSrc(finalUrl);
       
-      toast.success(`SCORM ${version} package loaded`);
-      console.log("[SCORM] Package ready");
+      toast.success(`SCORM ${version} package loaded successfully`);
+      console.log("[SCORM] Package ready to play");
     } catch (error) {
       console.error("[SCORM] Load error:", error);
       toast.error("Failed to load SCORM package", {
